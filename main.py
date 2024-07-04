@@ -4,6 +4,19 @@ import random
 
 from sqlalchemy import text
 
+from langchain_core.prompts import PromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_openai import ChatOpenAI
+from langchain.schema.messages import HumanMessage, SystemMessage
+from langchain.prompts import ChatPromptTemplate
+from langchain.document_loaders.csv_loader import CSVLoader
+from langchain_community.vectorstores import Chroma
+from langchain.document_loaders.json_loader import JSONLoader
+from langchain_community.vectorstores import Chroma, DocArrayInMemorySearch
+from langchain_openai import OpenAIEmbeddings
+from operator import itemgetter
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from transformers import AutoModelForCausalM, AutoTokeizer
+
 from flask import Flask, render_template, request, flash, redirect, url_for, session
 from flask_sqlalchemy import SQLAlchemy
 #from flask_uploads import configure_uploads, UploadSet, IMAGES
@@ -11,9 +24,11 @@ from flask_sqlalchemy import SQLAlchemy
 ssl._create_default_https_context = ssl._create_unverified_context
 TEMPLATES_AUTO_RELOAD = True
 
+CONCIERGE_DB = "dconcierge.db"
 
 
-GM_API =os.environ.get("DRUM_API")
+OPEN_KEI = os.environ.get("OPENAI_API)"
+
 
 app = Flask(__name__)
 app.secret_key = "zacuscacuvinetesiciuperciafumate"
@@ -490,59 +505,104 @@ def registeraccount():
 # add members into groups
 
 
-@app.route('/newgift', methods=['GET', 'POST'])
-def request_gift_rec():
-    user_id = session.get("user_id")
-    user = User.query.get(user_id)
+@app.route('/airec', methods=methods=['GET', 'POST'])
+def airec_endpoint():
+    if request.method == "GET":
+        return "GET request received"
+    elif request.method == "POST":
+        user_input = request.json['user_input']
+        
+        chat_model = ChatOpenAI(model="gpt-3.5-turbo-0125", api_key=OPEN_KEI, temperature=0)
+        
+        context = ("The gift is for Diana, the most important person in my life. She is turning 40. "
+           "She is straight, with a global citizen identity, no allergies, and no dietary prefrerences")
+        
+        question = ("Who is the gift for? What relationship do you have with the receiver? "
+            "Is the gift for any special occasion? "
+            "Do you know the receiver's sexual orientation?"
+            "Does the receiver have a strong cultural identity or "
+            "should they be considered as global citizen?"
+            "Does the receiver have any allergies?"
+            "Do you know the receiver's dietary preferences?")
+        
+        app_template_str = f"""You are an app suggesting questions that should guide users 
+    towards personalised gifts. The user provides you with a persona description and you 
+    return a gift recommendation. The persona is developed around a context 
+    based on the following questions:
+    Who is the gift for? What relationship do you have with the receiver? 
+    Is the gift for any special occasion?
+    Do you know the receiver's sexual orientation?
+    Does the receiver have a strong cultural identity or
+    should they be considered as global citizen?
+    Does the receiver have any allergies?
+    Do you know the receiver's dietary preferences?. 
+    You should return a question about the receiver
+     as a hint. The user can request a new question. 
+    Once a question is approved by the user, 
+    you can issue a recommendation within the provided budget
+    . {context} {question} """
+    
+    app_template = ChatPromptTemplate.from_template(app_template_str)
+    
+    app_template.format(context=context, question=question)
+    
+    app_system_prompt = SystemMessagePromptTemplate(
+    prompt=PromptTemplate(input_variables=["context"],
+                          template=app_template_str,))
 
-    if user and request.method == "POST":
-        name = request.form.get('name')
-        involvementlevels = request.form.getlist('involvement')  # Use getlist for multi-select fields
-        liaison = request.form.get('type')
-        sexual_orientation = request.form.get('sexual_orientation')
-        allergies = request.form.get('allergies')
-        cultural_identity = request.form.get('cultural_identity')
-        religious_restrictions = request.form.get('religious_restrictions')
-        dietary_preferences = request.form.get('dietary_preferences')
+    app_human_prompt = HumanMessagePromptTemplate(
+    prompt=PromptTemplate(input_variables=["question"],
+                          template="{question}",))
 
-        print("DEBUG - Form Data:")
-        print("Name:", name, type(name))
-        print("Involvement Levels:", involvementlevels, type(involvementlevels))
-        print("Liaison:", liaison, type(liaison))
-        print("Sexual Orientation:", sexual_orientation, type(sexual_orientation))
-        print("Allergies:", allergies, type(allergies))
-        print("Cultural Identity:", cultural_identity, type(cultural_identity))
-        print("Religious Restrictions:", religious_restrictions, type(religious_restrictions))
-        print("Dietary Preferences:", dietary_preferences, type(dietary_preferences))
+    messages = [app_system_prompt, app_human_prompt]
 
-        try:
-            new_relationship = Relationship(
-                name=name,
-                liaison=liaison,
-                cultural_identity=cultural_identity,
-                religious_restrictions=religious_restrictions,
-                allergies=allergies,
-                sexual_orientation=sexual_orientation,
-                dietary_preferences=dietary_preferences,
-                involvementlevels=involvementlevels  # Make sure involvementlevels is a list
-            )
-            print("DEBUG - New Relationship Object:")
-            print(new_relationship)
+    review_prompt_template = ChatPromptTemplate(
+    input_variables=["context", "question"],
+    messages=messages,)
 
-            db.session.add(new_relationship)
-            db.session.commit()
+    review_chain = review_prompt_template | chat_model
 
-            new_occasion = request.form.get("occasion")
-            questions = Question.query.filter_by(liaison=liaison, occasion=new_occasion).all()
+    rec = review_chain.invoke({"context":"context", "question":"question"})
 
-            return render_template("recommendations.html", user=user, relationships=new_relationship,
-                                   questions=questions)
+    print(rec)
 
-        except Exception as e:
-            print("An error occurred while creating the new_relationship object:", e)
+    new_question_prompt = ChatPromptTemplate.from_template(
+    f"Provide new {question} for {context}")
 
-    return render_template("recommendations.html", user=user)
 
+    new_question_chain = (
+    {"context": chain, "question": itemgetter("question")} | new_question_prompt | model | parser)
+
+    new_question_chain.invoke(
+    {
+        "context": "context",
+        "question": "Generate new question until the user approves the provided question",
+    })
+
+
+    embeddings = OpenAIEmbeddings()
+    embedded_query = embeddings.embed_query("What data is available regarding the user? ")
+
+    ANSWERS = Relationship.query.filter(answers=answers).all()
+
+    available_receiver_data = DocArrayInMemorySearch.from_documents(ANSWERS, embedding=embeddings,)
+
+    available_receiver_data.similarity_search_with_score(query="What data is available regarding the user? ", k=3)
+
+    retriever1 = available_receiver_data.as_retriever()
+    retriever1.invoke("What data is available regarding the user? ")
+
+    setup = RunnableParallel(context=retriever1, question=RunnablePassthrough())
+    setup.invoke("What data is available regarding the user? ")
+
+    chain = setup | prompt | model | parser
+    chain.invoke("What data is available regarding the user? ")
+    
+    input_ids = tokenizer.encode(user_input, return_tensors = 'pt')
+    output = chat_model. generate(input_ids, max_lenght=50, num_return_sequence=1)
+    
+    response = tokenizer.decode(output[0],skip_special_tokens=True)
+    return jsonify({"response":response})
 
 
 
